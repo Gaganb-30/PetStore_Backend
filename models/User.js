@@ -87,7 +87,12 @@ const userSchema = new mongoose.Schema({
   }],
   refreshTokens: [{
     token: String,
-    createdAt: { type: Date, default: Date.now, expires: '7d' },
+    // NOTE: Do NOT add `expires` here — MongoDB TTL indexes only work on
+    // top-level document fields, not on subdocument array fields.
+    // Using `expires` on a nested field deletes the entire parent User document,
+    // not just the array element. Token lifetime is enforced by the JWT itself
+    // (jwtRefreshExpire) and stale tokens are pruned on each login/refresh.
+    createdAt: { type: Date, default: Date.now },
   }],
   isActive: {
     type: Boolean,
