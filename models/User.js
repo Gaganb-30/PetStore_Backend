@@ -3,7 +3,16 @@ import bcrypt from 'bcryptjs';
 
 /**
  * User Model
- * Supports customers and admins with address management, wishlist, and refresh tokens
+ * Supports customers (phone-OTP) and admins (email+password) with address
+ * management, wishlist, and refresh tokens.
+ *
+ * Auth flow change (phone-OTP):
+ *   - email  → optional (sparse unique index so existing email users are kept)
+ *   - phone  → required + unique for all non-admin accounts
+ *   - authProvider 'phone' is the new default for storefront users
+ *   - password is only required when authProvider === 'local' (admin path)
+ *   - otpLastSentAt tracks when the last OTP was sent so the server can
+ *     enforce the resend timeout independently of the client.
  */
 const addressSchema = new mongoose.Schema({
   fullName: { type: String, required: true, trim: true },
@@ -27,28 +36,39 @@ const userSchema = new mongoose.Schema({
   },
   lastName: {
     type: String,
-    required: [true, 'Last name is required'],
+    default: '',
     trim: true,
     maxlength: 50,
   },
+
+  // ---------------------------------------------------------------------
+  // Contact — email is now optional (kept for admin accounts & legacy data)
+  // phone is the primary identifier for storefront (phone-OTP) users
+  // ---------------------------------------------------------------------
   email: {
     type: String,
-    required: [true, 'Email is required'],
     unique: true,
+    sparse: true,           // allows multiple documents with no email
     lowercase: true,
     trim: true,
     match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
   },
+  phone: {
+    type: String,
+    trim: true,
+    unique: true,
+    sparse: true,           // admin/google accounts may not have a phone yet
+  },
+
   password: {
     type: String,
-    // Only local accounts carry a password. Google accounts authenticate via
-    // Google's ID token, so requiring one here would block OAuth sign-up.
+    // Only local (admin) accounts carry a password hash.
     required: [
       function () { return this.authProvider === 'local'; },
       'Password is required',
     ],
     minlength: [8, 'Password must be at least 8 characters'],
-    select: false, // Don't return password by default
+    select: false,
   },
 
   // ---------------------------------------------------------------------
@@ -56,8 +76,8 @@ const userSchema = new mongoose.Schema({
   // ---------------------------------------------------------------------
   authProvider: {
     type: String,
-    enum: ['local', 'google'],
-    default: 'local',
+    enum: ['phone', 'local', 'google'],
+    default: 'phone',
   },
   googleId: {
     type: String,
@@ -67,10 +87,11 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
-  phone: {
-    type: String,
-    trim: true,
+  isPhoneVerified: {
+    type: Boolean,
+    default: false,
   },
+
   avatar: {
     type: String,
     default: '',
@@ -80,6 +101,17 @@ const userSchema = new mongoose.Schema({
     enum: ['user', 'admin'],
     default: 'user',
   },
+
+  // ---------------------------------------------------------------------
+  // OTP resend throttle
+  // Stores the timestamp of the last successful OTP send so the server can
+  // reject resend requests that arrive before the configured timeout.
+  // ---------------------------------------------------------------------
+  otpLastSentAt: {
+    type: Date,
+    default: null,
+  },
+
   addresses: [addressSchema],
   wishlist: [{
     type: mongoose.Schema.Types.ObjectId,
@@ -98,8 +130,11 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: true,
   },
-  passwordResetToken: String,
-  passwordResetExpires: Date,
+
+  // Kept commented — not needed for phone-OTP users; retained for admin path
+  // passwordResetToken: String,
+  // passwordResetExpires: Date,
+
   lastLogin: Date,
 }, {
   timestamps: true,
@@ -109,15 +144,15 @@ const userSchema = new mongoose.Schema({
 
 // Virtual: full name
 userSchema.virtual('fullName').get(function () {
-  return `${this.firstName} ${this.lastName}`;
+  return `${this.firstName} ${this.lastName}`.trim();
 });
 
-// Index for faster queries
+// Indexes
 userSchema.index({ role: 1 });
-// Sparse so that the many local accounts (no googleId) don't collide on null
+// Sparse so that the many phone accounts (no googleId) don't collide on null
 userSchema.index({ googleId: 1 }, { unique: true, sparse: true });
 
-// Pre-save: hash password
+// Pre-save: hash password (only for local/admin accounts)
 userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   const salt = await bcrypt.genSalt(12);
@@ -125,14 +160,13 @@ userSchema.pre('save', async function (next) {
   next();
 });
 
-// Method: compare password. Google-only accounts have no password hash, so
-// any comparison against them must fail rather than throw.
+// Method: compare password. Non-local accounts have no password hash.
 userSchema.methods.comparePassword = async function (candidatePassword) {
   if (!this.password) return false;
   return bcrypt.compare(candidatePassword, this.password);
 };
 
-// Method: does this account have a usable password (false for Google-only users)
+// Method: does this account have a usable password (false for phone/Google users)
 userSchema.methods.hasPassword = function () {
   return Boolean(this.password) || this.authProvider === 'local';
 };

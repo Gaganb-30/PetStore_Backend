@@ -53,7 +53,7 @@ const settingsSchema = new mongoose.Schema({
   },
   freeShippingThreshold: {
     type: Number,
-    default: 499, // Free shipping above ₹499
+    default: 0, // Free shipping on all orders
   },
   taxRate: {
     type: Number,

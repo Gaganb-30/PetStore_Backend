@@ -244,7 +244,10 @@ const normalisePayload = (body) => {
         mrp: v.mrp === '' || v.mrp === undefined ? undefined : Number(v.mrp),
         stock: Number(v.stock) || 0,
         images: (v.images || []).map((i) => String(i).trim()).filter(Boolean),
-        attributeCombination: v.attributeCombination || {},
+        // Trim whitespace from keys AND values to prevent "Color " ≠ "Color" mismatches
+        attributeCombination: Object.fromEntries(
+          Object.entries(v.attributeCombination || {}).map(([k, val]) => [k.trim(), String(val).trim()])
+        ),
       }));
   }
 

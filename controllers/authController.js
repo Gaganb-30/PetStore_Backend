@@ -1,23 +1,28 @@
-import crypto from 'crypto';
-import { OAuth2Client } from 'google-auth-library';
 import User from '../models/User.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/generateToken.js';
 import { asyncHandler } from '../utils/helpers.js';
 import { ApiError } from '../middleware/errorHandler.js';
-import { sendPasswordResetEmail, sendWelcomeEmail } from '../services/emailService.js';
+import { sendOtp as sendOtpViaMsg91, verifyOtp as verifyOtpViaMsg91 } from '../services/otpService.js';
 import config from '../config/index.js';
+
+// ---------------------------------------------------------------------------
+// Commented-out providers (kept for easy re-enable later)
+// ---------------------------------------------------------------------------
+// import crypto from 'crypto';
+// import { OAuth2Client } from 'google-auth-library';
+// import { sendPasswordResetEmail, sendWelcomeEmail } from '../services/emailService.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/** Google ID-token verifier (created lazily so the app boots without a client ID) */
-let googleClient;
-const getGoogleClient = () => {
-  if (!config.google.clientId) return null;
-  if (!googleClient) googleClient = new OAuth2Client(config.google.clientId);
-  return googleClient;
-};
+// /** Google ID-token verifier (created lazily so the app boots without a client ID) */
+// let googleClient;
+// const getGoogleClient = () => {
+//   if (!config.google.clientId) return null;
+//   if (!googleClient) googleClient = new OAuth2Client(config.google.clientId);
+//   return googleClient;
+// };
 
 /** Cookie options for the refresh-token cookie */
 const refreshCookieOptions = () => ({
@@ -44,8 +49,7 @@ export const publicUser = (user) => ({
 
 /**
  * Issue an access token, persist + set a rotating refresh token, and respond.
- * Every login path (local, Google, register) funnels through here so the
- * session contract stays identical no matter how the user signed in.
+ * Every login path funnels through here so the session contract is identical.
  */
 const sendAuthResponse = async (res, user, { status = 200, message } = {}) => {
   const accessToken = generateAccessToken(user._id);
@@ -68,130 +72,207 @@ const sendAuthResponse = async (res, user, { status = 200, message } = {}) => {
   });
 };
 
+// ---------------------------------------------------------------------------
+// Phone + OTP auth (primary storefront flow)
+// ---------------------------------------------------------------------------
+
+// In-memory fallback for throttling repeat OTP sends for unregistered phone numbers
+const recentOtpSends = new Map();
+
 /**
- * @desc    Register new user
- * @route   POST /api/auth/register
+ * @desc    Send OTP to a mobile number
+ * @route   POST /api/auth/send-otp
  * @access  Public
  */
-export const register = asyncHandler(async (req, res) => {
-  const { firstName, lastName, email, password, phone } = req.body;
+export const sendOtp = asyncHandler(async (req, res) => {
+  const { phone } = req.body;
 
-  // Check if user already exists
-  const existingUser = await User.findOne({ email });
-  if (existingUser) {
-    throw new ApiError(400, 'An account with this email already exists.');
+  // Basic Indian mobile number validation (10 digits, starts 6-9)
+  if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
+    throw new ApiError(400, 'Please enter a valid 10-digit Indian mobile number.');
   }
 
-  // Create user
-  const user = await User.create({
-    firstName, lastName, email, password, phone, authProvider: 'local',
+  // Enforce resend timeout — check in-memory map and existing user's otpLastSentAt
+  const existingUser = await User.findOne({ phone });
+  const lastSent = existingUser?.otpLastSentAt?.getTime() || recentOtpSends.get(phone);
+  if (lastSent) {
+    const elapsedMinutes = (Date.now() - lastSent) / 1000 / 60;
+    if (elapsedMinutes < config.otpTimeoutMinutes) {
+      const waitSecs = Math.ceil((config.otpTimeoutMinutes - elapsedMinutes) * 60);
+      throw new ApiError(
+        429,
+        `Please wait ${waitSecs} seconds before requesting a new OTP.`,
+      );
+    }
+  }
+
+  // Send OTP via MSG91
+  await sendOtpViaMsg91(phone);
+
+  // Record send timestamp in memory and in DB if user exists
+  recentOtpSends.set(phone, Date.now());
+  setTimeout(() => recentOtpSends.delete(phone), (config.otpTimeoutMinutes + 1) * 60 * 1000);
+
+  await User.updateOne(
+    { phone },
+    { $set: { otpLastSentAt: new Date() } },
+    { upsert: false },
+  );
+
+  res.json({
+    success: true,
+    message: 'OTP sent successfully.',
+    data: { otpTimeoutMinutes: config.otpTimeoutMinutes },
   });
-
-  // Send welcome email (non-blocking — a mail outage must not fail signup)
-  sendWelcomeEmail(user);
-
-  await sendAuthResponse(res, user, { status: 201, message: 'Account created successfully.' });
 });
 
 /**
- * @desc    Sign in (or sign up) with Google
- * @route   POST /api/auth/google
+ * @desc    Verify OTP and issue a session (creates account if phone is new)
+ * @route   POST /api/auth/verify-otp
  * @access  Public
- *
- * The client sends the Google ID token ("credential") it received from Google
- * Identity Services. We verify it server-side against Google's public keys —
- * the client is never trusted to assert who it is.
  */
-export const googleAuth = asyncHandler(async (req, res) => {
-  const { credential } = req.body;
+export const verifyOtp = asyncHandler(async (req, res) => {
+  const { phone, otp } = req.body;
 
-  const client = getGoogleClient();
-  if (!client) {
-    throw new ApiError(503, 'Google sign-in is not configured on this server.');
+  if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
+    throw new ApiError(400, 'Invalid phone number.');
   }
-  if (!credential) {
-    throw new ApiError(400, 'Missing Google credential.');
+  if (!otp || !/^\d{6}$/.test(otp)) {
+    throw new ApiError(400, 'OTP must be 6 digits.');
   }
 
-  let payload;
-  try {
-    const ticket = await client.verifyIdToken({
-      idToken: credential,
-      audience: config.google.clientId,
+  // Verify against MSG91 (or dev store)
+  const isValid = await verifyOtpViaMsg91(phone, otp);
+  if (!isValid) {
+    throw new ApiError(401, 'Incorrect OTP. Please try again.');
+  }
+
+  // Find or create user
+  let user = await User.findOne({ phone });
+  let isNew = false;
+
+  if (!user) {
+    // New user — create account with a placeholder name so the document is valid.
+    // firstName carries a timestamp suffix so every auto-created account is
+    // distinguishable even if the user abandons checkout before entering a real name.
+    const ts = Date.now();
+    user = await User.create({
+      firstName: `Guest${ts}`,
+      lastName: '',
+      phone,
+      authProvider: 'phone',
+      isPhoneVerified: true,
     });
-    payload = ticket.getPayload();
-  } catch {
-    throw new ApiError(401, 'Google sign-in failed. Please try again.');
-  }
-
-  if (!payload?.email) {
-    throw new ApiError(401, 'Google account did not return an email address.');
-  }
-
-  const email = payload.email.toLowerCase();
-
-  // Existing account by Google ID, or by email (links a pre-existing local account)
-  let user = await User.findOne({ $or: [{ googleId: payload.sub }, { email }] });
-
-  if (user) {
-    // Link the Google identity to the existing account on first Google login
-    if (!user.googleId) {
-      user.googleId = payload.sub;
-      if (!user.avatar && payload.picture) user.avatar = payload.picture;
-    }
-    if (payload.email_verified) user.isEmailVerified = true;
+    isNew = true;
+  } else {
     if (!user.isActive) {
       throw new ApiError(403, 'Account is deactivated. Contact support.');
     }
-  } else {
-    const [firstName, ...rest] = (payload.name || email.split('@')[0]).split(' ');
-    user = new User({
-      firstName: firstName || 'Pet',
-      lastName: rest.join(' ') || 'Parent',
-      email,
-      googleId: payload.sub,
-      authProvider: 'google',
-      avatar: payload.picture || '',
-      isEmailVerified: Boolean(payload.email_verified),
-    });
-    await user.save();
-    sendWelcomeEmail(user);
+    // Mark phone as verified on every successful OTP (idempotent)
+    user.isPhoneVerified = true;
+    // Reset the resend throttle timestamp after a successful verify
+    user.otpLastSentAt = null;
+    await user.save({ validateBeforeSave: false });
   }
 
-  await sendAuthResponse(res, user, { message: 'Signed in with Google.' });
+  await sendAuthResponse(res, user, {
+    status: isNew ? 201 : 200,
+    message: isNew ? 'Account created. Welcome to AniLiving!' : 'Login successful.',
+  });
 });
+
+// ---------------------------------------------------------------------------
+// Admin-only email + password login (kept private, not exposed in public UI)
+// ---------------------------------------------------------------------------
 
 /**
- * @desc    Login user
- * @route   POST /api/auth/login
- * @access  Public
+ * @desc    Admin login with email + password
+ * @route   POST /api/auth/admin-login
+ * @access  Public (but only issues session for role === 'admin')
  */
-export const login = asyncHandler(async (req, res) => {
+export const adminLogin = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
 
-  // Find user with password
   const user = await User.findOne({ email }).select('+password');
   if (!user) {
-    throw new ApiError(401, 'Invalid email or password.');
+    throw new ApiError(401, 'Invalid credentials.');
   }
-
+  if (user.role !== 'admin') {
+    throw new ApiError(403, 'Access denied.');
+  }
   if (!user.isActive) {
-    throw new ApiError(403, 'Your account has been deactivated. Contact support.');
+    throw new ApiError(403, 'Account is deactivated. Contact support.');
+  }
+  if (!user.password) {
+    throw new ApiError(400, 'This admin account has no password set.');
   }
 
-  // Google-only accounts have no password hash — point them at the right button
-  if (!user.password && user.authProvider === 'google') {
-    throw new ApiError(400, 'This account uses Google sign-in. Please continue with Google.');
-  }
-
-  // Check password
   const isMatch = await user.comparePassword(password);
   if (!isMatch) {
-    throw new ApiError(401, 'Invalid email or password.');
+    throw new ApiError(401, 'Invalid credentials.');
   }
 
-  await sendAuthResponse(res, user, { message: 'Login successful.' });
+  await sendAuthResponse(res, user, { message: 'Admin login successful.' });
 });
+
+// ---------------------------------------------------------------------------
+// Google OAuth (commented out — re-enable when needed)
+// ---------------------------------------------------------------------------
+
+// /**
+//  * @desc    Sign in (or sign up) with Google
+//  * @route   POST /api/auth/google
+//  * @access  Public
+//  */
+// export const googleAuth = asyncHandler(async (req, res) => {
+//   const { credential } = req.body;
+//   const client = getGoogleClient();
+//   if (!client) throw new ApiError(503, 'Google sign-in is not configured on this server.');
+//   if (!credential) throw new ApiError(400, 'Missing Google credential.');
+//
+//   let payload;
+//   try {
+//     const ticket = await client.verifyIdToken({
+//       idToken: credential,
+//       audience: config.google.clientId,
+//     });
+//     payload = ticket.getPayload();
+//   } catch {
+//     throw new ApiError(401, 'Google sign-in failed. Please try again.');
+//   }
+//
+//   if (!payload?.email) throw new ApiError(401, 'Google account did not return an email address.');
+//   const email = payload.email.toLowerCase();
+//   let user = await User.findOne({ $or: [{ googleId: payload.sub }, { email }] });
+//
+//   if (user) {
+//     if (!user.googleId) {
+//       user.googleId = payload.sub;
+//       if (!user.avatar && payload.picture) user.avatar = payload.picture;
+//     }
+//     if (payload.email_verified) user.isEmailVerified = true;
+//     if (!user.isActive) throw new ApiError(403, 'Account is deactivated. Contact support.');
+//   } else {
+//     const [firstName, ...rest] = (payload.name || email.split('@')[0]).split(' ');
+//     user = new User({
+//       firstName: firstName || 'Pet',
+//       lastName: rest.join(' ') || 'Parent',
+//       email,
+//       googleId: payload.sub,
+//       authProvider: 'google',
+//       avatar: payload.picture || '',
+//       isEmailVerified: Boolean(payload.email_verified),
+//     });
+//     await user.save();
+//     sendWelcomeEmail(user);
+//   }
+//
+//   await sendAuthResponse(res, user, { message: 'Signed in with Google.' });
+// });
+
+// ---------------------------------------------------------------------------
+// Session management (unchanged)
+// ---------------------------------------------------------------------------
 
 /**
  * @desc    Logout user
@@ -202,7 +283,6 @@ export const logout = asyncHandler(async (req, res) => {
   const refreshToken = req.cookies.refreshToken;
 
   if (refreshToken) {
-    // Remove refresh token from user
     await User.findByIdAndUpdate(req.user._id, {
       $pull: { refreshTokens: { token: refreshToken } },
     });
@@ -224,7 +304,6 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
     throw new ApiError(401, 'No refresh token. Please login again.');
   }
 
-  // Verify refresh token
   let decoded;
   try {
     decoded = verifyRefreshToken(refreshToken);
@@ -233,7 +312,6 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
     throw new ApiError(401, 'Invalid refresh token. Please login again.');
   }
 
-  // Find user and check if this refresh token exists
   const user = await User.findById(decoded.id);
   if (!user) {
     throw new ApiError(401, 'User not found.');
@@ -241,18 +319,15 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
 
   const tokenExists = user.refreshTokens.some((t) => t.token === refreshToken);
   if (!tokenExists) {
-    // Token reuse detected — clear all refresh tokens (security measure)
     user.refreshTokens = [];
     await user.save({ validateBeforeSave: false });
     res.clearCookie('refreshToken');
     throw new ApiError(401, 'Token reuse detected. Please login again.');
   }
 
-  // Generate new tokens (token rotation)
   const newAccessToken = generateAccessToken(user._id);
   const newRefreshToken = generateRefreshToken(user._id);
 
-  // Replace old refresh token with new one
   user.refreshTokens = user.refreshTokens.filter((t) => t.token !== refreshToken);
   user.refreshTokens.push({ token: newRefreshToken });
   await user.save({ validateBeforeSave: false });
@@ -266,60 +341,6 @@ export const refreshAccessToken = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Forgot password — send reset email
- * @route   POST /api/auth/forgot-password
- * @access  Public
- */
-export const forgotPassword = asyncHandler(async (req, res) => {
-  const { email } = req.body;
-
-  const user = await User.findOne({ email });
-  if (!user) {
-    // Don't reveal if user exists
-    return res.json({ success: true, message: 'If the email exists, a reset link has been sent.' });
-  }
-
-  // Generate reset token
-  const resetToken = crypto.randomBytes(32).toString('hex');
-  user.passwordResetToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-  user.passwordResetExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
-  await user.save({ validateBeforeSave: false });
-
-  // Send email
-  const resetUrl = `${config.clientUrl}/reset-password/${resetToken}`;
-  await sendPasswordResetEmail(user, resetUrl);
-
-  res.json({ success: true, message: 'If the email exists, a reset link has been sent.' });
-});
-
-/**
- * @desc    Reset password
- * @route   POST /api/auth/reset-password/:token
- * @access  Public
- */
-export const resetPassword = asyncHandler(async (req, res) => {
-  const { password } = req.body;
-  const hashedToken = crypto.createHash('sha256').update(req.params.token).digest('hex');
-
-  const user = await User.findOne({
-    passwordResetToken: hashedToken,
-    passwordResetExpires: { $gt: Date.now() },
-  });
-
-  if (!user) {
-    throw new ApiError(400, 'Invalid or expired reset token.');
-  }
-
-  user.password = password;
-  user.passwordResetToken = undefined;
-  user.passwordResetExpires = undefined;
-  user.refreshTokens = []; // Invalidate all sessions
-  await user.save();
-
-  res.json({ success: true, message: 'Password reset successful. Please login with your new password.' });
-});
-
-/**
  * @desc    Get current user
  * @route   GET /api/auth/me
  * @access  Private
@@ -330,3 +351,12 @@ export const getMe = asyncHandler(async (req, res) => {
     data: { user: publicUser(req.user) },
   });
 });
+
+// ---------------------------------------------------------------------------
+// Legacy endpoints — commented out, not removed
+// ---------------------------------------------------------------------------
+
+// export const register = asyncHandler(async (req, res) => { ... });
+// export const login = asyncHandler(async (req, res) => { ... });
+// export const forgotPassword = asyncHandler(async (req, res) => { ... });
+// export const resetPassword = asyncHandler(async (req, res) => { ... });

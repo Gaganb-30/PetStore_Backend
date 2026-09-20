@@ -3,30 +3,57 @@ import { body } from 'express-validator';
 import validate from '../middleware/validate.js';
 import { protect } from '../middleware/auth.js';
 import {
-  register, login, googleAuth, logout, refreshAccessToken,
-  forgotPassword, resetPassword, getMe,
+  sendOtp, verifyOtp, adminLogin,
+  logout, refreshAccessToken, getMe,
 } from '../controllers/authController.js';
+
+// Commented-out imports (re-enable with their routes below when needed)
+// import { googleAuth } from '../controllers/authController.js';
 
 const router = Router();
 
-// Register
-router.post('/register', [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
-  body('email').isEmail().withMessage('Valid email is required'),
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-], validate, register);
+// ---------------------------------------------------------------------------
+// Phone + OTP (primary storefront auth)
+// ---------------------------------------------------------------------------
 
-// Login
-router.post('/login', [
+// Step 1 — send OTP to phone number
+router.post('/send-otp', [
+  body('phone')
+    .trim()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Enter a valid 10-digit Indian mobile number'),
+], validate, sendOtp);
+
+// Step 2 — verify OTP, create or retrieve account, issue session
+router.post('/verify-otp', [
+  body('phone')
+    .trim()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Enter a valid 10-digit Indian mobile number'),
+  body('otp')
+    .trim()
+    .matches(/^\d{6}$/)
+    .withMessage('OTP must be exactly 6 digits'),
+], validate, verifyOtp);
+
+// ---------------------------------------------------------------------------
+// Admin-only email + password login (not linked from the storefront UI)
+// ---------------------------------------------------------------------------
+router.post('/admin-login', [
   body('email').isEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required'),
-], validate, login);
+], validate, adminLogin);
 
-// Google OAuth — verifies the ID token issued by Google Identity Services
-router.post('/google', [
-  body('credential').notEmpty().withMessage('Google credential is required'),
-], validate, googleAuth);
+// ---------------------------------------------------------------------------
+// Google OAuth — commented out, re-enable when ready
+// ---------------------------------------------------------------------------
+// router.post('/google', [
+//   body('credential').notEmpty().withMessage('Google credential is required'),
+// ], validate, googleAuth);
+
+// ---------------------------------------------------------------------------
+// Session management (unchanged)
+// ---------------------------------------------------------------------------
 
 // Logout
 router.post('/logout', protect, logout);
@@ -34,17 +61,15 @@ router.post('/logout', protect, logout);
 // Refresh token
 router.post('/refresh-token', refreshAccessToken);
 
-// Forgot password
-router.post('/forgot-password', [
-  body('email').isEmail().withMessage('Valid email is required'),
-], validate, forgotPassword);
-
-// Reset password
-router.post('/reset-password/:token', [
-  body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-], validate, resetPassword);
-
 // Get current user
 router.get('/me', protect, getMe);
+
+// ---------------------------------------------------------------------------
+// Legacy routes — commented out, not removed
+// ---------------------------------------------------------------------------
+// router.post('/register', [...], validate, register);
+// router.post('/login', [...], validate, login);
+// router.post('/forgot-password', [...], validate, forgotPassword);
+// router.post('/reset-password/:token', [...], validate, resetPassword);
 
 export default router;

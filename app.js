@@ -85,7 +85,7 @@ const apiLimiter = rateLimit({
 });
 app.use('/api', apiLimiter);
 
-// Credential endpoints get a much tighter budget to blunt brute-force attempts
+// Credential endpoints get a tighter budget to blunt brute-force attempts
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -94,6 +94,30 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   skipSuccessfulRequests: true,
 });
+
+// Stricter limiter for sending OTP to protect SMS credits and prevent SMS bombing
+const otpSendLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 5,                   // max 5 OTP send attempts per IP
+  message: { success: false, message: 'Too many OTP requests. Please wait a few minutes before trying again.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Limiter for OTP verification to prevent brute-forcing OTP codes
+const otpVerifyLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: 10,
+  message: { success: false, message: 'Too many verification attempts. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+});
+
+app.use('/api/auth/send-otp', otpSendLimiter);
+app.use('/api/auth/verify-otp', otpVerifyLimiter);
+app.use('/api/auth/admin-login', authLimiter);
+// Legacy routes (if any calls still hit them)
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 app.use('/api/auth/forgot-password', authLimiter);

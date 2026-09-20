@@ -71,7 +71,7 @@ const adjustStock = async (productId, variantId, delta) => {
  * @access  Private
  */
 export const createOrder = asyncHandler(async (req, res) => {
-  const { shippingAddress, paymentMethod, couponCode, customerNote } = req.body;
+  const { shippingAddress, paymentMethod, couponCode, customerNote, directItem } = req.body;
   const settings = await Settings.getSettings();
 
   // Address and phone are mandatory before any order can be placed.
@@ -84,14 +84,32 @@ export const createOrder = asyncHandler(async (req, res) => {
     throw new ApiError(400, 'Please provide a valid 10-digit mobile number for delivery updates.');
   }
 
-  const cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
-  if (!cart || cart.items.length === 0) {
-    throw new ApiError(400, 'Your cart is empty.');
-  }
+  let cart = null;
+  let activeItems = [];
+  const isDirectBuy = Boolean(directItem?.productId);
 
-  const activeItems = cart.items.filter((item) => !item.savedForLater);
-  if (activeItems.length === 0) {
-    throw new ApiError(400, 'No active items in your cart.');
+  if (isDirectBuy) {
+    const product = await Product.findById(directItem.productId);
+    if (!product || !product.isActive) {
+      throw new ApiError(400, 'This product is no longer available.');
+    }
+    const quantity = Math.max(1, parseInt(directItem.quantity, 10) || 1);
+    activeItems = [{
+      product,
+      variantId: directItem.variantId || null,
+      variant: directItem.variant || null,
+      quantity,
+    }];
+  } else {
+    cart = await Cart.findOne({ user: req.user._id }).populate('items.product');
+    if (!cart || cart.items.length === 0) {
+      throw new ApiError(400, 'Your cart is empty.');
+    }
+
+    activeItems = cart.items.filter((item) => !item.savedForLater);
+    if (activeItems.length === 0) {
+      throw new ApiError(400, 'No active items in your cart.');
+    }
   }
 
   // -------------------------------------------------------------------
@@ -150,13 +168,15 @@ export const createOrder = asyncHandler(async (req, res) => {
     couponData = { code: couponDoc.code, discount: discountAmount };
   }
 
-  const taxableAmount = itemsPrice - discountAmount;
-  const taxPrice = round2(taxableAmount * (settings.taxRate / 100));
+  const taxableAmount = Math.max(0, itemsPrice - discountAmount);
+  // Product prices entered in admin are already inclusive of GST and all taxes.
+  // Calculate embedded GST portion for records and invoice:
+  const taxRate = Number(settings.taxRate) || 0;
+  const taxPrice = taxRate > 0 ? round2(taxableAmount - (taxableAmount / (1 + taxRate / 100))) : 0;
 
-  let shippingPrice = settings.shippingCharge;
-  if (itemsPrice >= settings.freeShippingThreshold) shippingPrice = 0;
+  const shippingPrice = 0; // Free delivery on all orders regardless of amount
 
-  const totalPrice = round2(taxableAmount + taxPrice + shippingPrice);
+  const totalPrice = round2(taxableAmount + shippingPrice);
 
   if (paymentMethod === 'cod' && !settings.codEnabled) {
     throw new ApiError(400, 'Cash on Delivery is not available right now.');
@@ -226,10 +246,12 @@ export const createOrder = asyncHandler(async (req, res) => {
     await couponDoc.save();
   }
 
-  // Empty the cart, keeping anything saved for later
-  cart.items = cart.items.filter((item) => item.savedForLater);
-  cart.coupon = undefined;
-  await cart.save();
+  // Empty the cart only if ordered via cart, keeping saved-for-later items. Direct Buy Now preserves cart.
+  if (!isDirectBuy && cart) {
+    cart.items = cart.items.filter((item) => item.savedForLater);
+    cart.coupon = undefined;
+    await cart.save();
+  }
 
   // COD orders are confirmed immediately, so mail the confirmation now.
   if (paymentMethod === 'cod') sendOrderConfirmation(req.user, order);

@@ -45,6 +45,29 @@ const config = {
     pass: process.env.SMTP_PASS || '',
     from: process.env.EMAIL_FROM || 'AniLiving <noreply@aniliving.com>',
   },
+
+  // MSG91 OTP
+  msg91: {
+    authKey:    process.env.MSG91_AUTH_KEY    || '',
+    templateId: process.env.MSG91_TEMPLATE_ID || '',
+    senderId:   process.env.MSG91_SENDER_ID   || 'ANILVG',
+  },
+
+  // How many minutes the user must wait before requesting a new OTP
+  otpTimeoutMinutes: parseInt(process.env.OTP_TIMEOUT_MINUTES, 10) || 2,
+
+  // Seller information for GST Tax Invoices
+  seller: {
+    name: process.env.SELLER_NAME || 'AniLiving',
+    addressLine1: process.env.SELLER_ADDRESS_LINE1 || 'C-279, Karawal Nagar, Gali Number 7',
+    addressLine2: process.env.SELLER_ADDRESS_LINE2 || 'Mukund Vihar',
+    city: process.env.SELLER_CITY || 'North East Delhi',
+    state: process.env.SELLER_STATE || 'Delhi',
+    pincode: process.env.SELLER_PINCODE || '110094',
+    country: process.env.SELLER_COUNTRY || 'IN',
+    pan: process.env.SELLER_PAN || process.env.PAN_NUMBER || '',
+    gstin: process.env.SELLER_GSTIN || process.env.GST_NUMBER || '',
+  },
 };
 
 export default config;

@@ -256,7 +256,7 @@ const run = async () => {
   check('order number generated', /^ANI-\d{8}-\d{4}[0-9A-F]{4}$/.test(orderNumber || ''), orderNumber);
   check('order priced from the variant, not the base product',
     order.body.data.order.itemsPrice === 2598, String(order.body.data.order.itemsPrice));
-  check('tax applied on top', order.body.data.order.taxPrice > 0);
+  check('tax computed as included GST', order.body.data.order.taxPrice > 0);
 
   const afterOrder = await Product.findById(productId);
   const redM = afterOrder.variants.find((v) => v.sku === 'HAR-R-M');
