@@ -13,23 +13,23 @@ import {
 const router = Router();
 
 // ---------------------------------------------------------------------------
-// Phone + OTP (primary storefront auth)
+// Email + OTP (primary storefront auth)
 // ---------------------------------------------------------------------------
 
-// Step 1 — send OTP to phone number
+// Step 1 — send OTP to email address
 router.post('/send-otp', [
-  body('phone')
+  body('email')
     .trim()
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Enter a valid 10-digit Indian mobile number'),
+    .isEmail()
+    .withMessage('Enter a valid email address'),
 ], validate, sendOtp);
 
 // Step 2 — verify OTP, create or retrieve account, issue session
 router.post('/verify-otp', [
-  body('phone')
+  body('email')
     .trim()
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Enter a valid 10-digit Indian mobile number'),
+    .isEmail()
+    .withMessage('Enter a valid email address'),
   body('otp')
     .trim()
     .matches(/^\d{6}$/)

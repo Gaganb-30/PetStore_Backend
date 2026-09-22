@@ -2,7 +2,7 @@ import User from '../models/User.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/generateToken.js';
 import { asyncHandler } from '../utils/helpers.js';
 import { ApiError } from '../middleware/errorHandler.js';
-import { sendOtp as sendOtpViaMsg91, verifyOtp as verifyOtpViaMsg91 } from '../services/otpService.js';
+import { sendOtp as sendOtpViaEmail, verifyOtp as verifyOtpViaEmail } from '../services/otpService.js';
 import config from '../config/index.js';
 
 // ---------------------------------------------------------------------------
@@ -73,28 +73,30 @@ const sendAuthResponse = async (res, user, { status = 200, message } = {}) => {
 };
 
 // ---------------------------------------------------------------------------
-// Phone + OTP auth (primary storefront flow)
+// Email + OTP auth (primary storefront flow)
 // ---------------------------------------------------------------------------
 
-// In-memory fallback for throttling repeat OTP sends for unregistered phone numbers
+// In-memory fallback for throttling repeat OTP sends for unregistered emails
 const recentOtpSends = new Map();
 
 /**
- * @desc    Send OTP to a mobile number
+ * @desc    Send OTP to an email address
  * @route   POST /api/auth/send-otp
  * @access  Public
  */
 export const sendOtp = asyncHandler(async (req, res) => {
-  const { phone } = req.body;
+  const { email } = req.body;
 
-  // Basic Indian mobile number validation (10 digits, starts 6-9)
-  if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
-    throw new ApiError(400, 'Please enter a valid 10-digit Indian mobile number.');
+  // Basic email validation
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    throw new ApiError(400, 'Please enter a valid email address.');
   }
 
+  const normalizedEmail = email.toLowerCase().trim();
+
   // Enforce resend timeout — check in-memory map and existing user's otpLastSentAt
-  const existingUser = await User.findOne({ phone });
-  const lastSent = existingUser?.otpLastSentAt?.getTime() || recentOtpSends.get(phone);
+  const existingUser = await User.findOne({ email: normalizedEmail });
+  const lastSent = existingUser?.otpLastSentAt?.getTime() || recentOtpSends.get(normalizedEmail);
   if (lastSent) {
     const elapsedMinutes = (Date.now() - lastSent) / 1000 / 60;
     if (elapsedMinutes < config.otpTimeoutMinutes) {
@@ -106,15 +108,15 @@ export const sendOtp = asyncHandler(async (req, res) => {
     }
   }
 
-  // Send OTP via MSG91
-  await sendOtpViaMsg91(phone);
+  // Send OTP via email
+  await sendOtpViaEmail(normalizedEmail);
 
   // Record send timestamp in memory and in DB if user exists
-  recentOtpSends.set(phone, Date.now());
-  setTimeout(() => recentOtpSends.delete(phone), (config.otpTimeoutMinutes + 1) * 60 * 1000);
+  recentOtpSends.set(normalizedEmail, Date.now());
+  setTimeout(() => recentOtpSends.delete(normalizedEmail), (config.otpTimeoutMinutes + 1) * 60 * 1000);
 
   await User.updateOne(
-    { phone },
+    { email: normalizedEmail },
     { $set: { otpLastSentAt: new Date() } },
     { upsert: false },
   );
@@ -127,28 +129,30 @@ export const sendOtp = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Verify OTP and issue a session (creates account if phone is new)
+ * @desc    Verify OTP and issue a session (creates account if email is new)
  * @route   POST /api/auth/verify-otp
  * @access  Public
  */
 export const verifyOtp = asyncHandler(async (req, res) => {
-  const { phone, otp } = req.body;
+  const { email, otp } = req.body;
 
-  if (!phone || !/^[6-9]\d{9}$/.test(phone)) {
-    throw new ApiError(400, 'Invalid phone number.');
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    throw new ApiError(400, 'Invalid email address.');
   }
   if (!otp || !/^\d{6}$/.test(otp)) {
     throw new ApiError(400, 'OTP must be 6 digits.');
   }
 
-  // Verify against MSG91 (or dev store)
-  const isValid = await verifyOtpViaMsg91(phone, otp);
+  const normalizedEmail = email.toLowerCase().trim();
+
+  // Verify against OTP store
+  const isValid = await verifyOtpViaEmail(normalizedEmail, otp);
   if (!isValid) {
-    throw new ApiError(401, 'Incorrect OTP. Please try again.');
+    throw new ApiError(401, 'Incorrect or expired OTP. Please try again.');
   }
 
   // Find or create user
-  let user = await User.findOne({ phone });
+  let user = await User.findOne({ email: normalizedEmail });
   let isNew = false;
 
   if (!user) {
@@ -159,17 +163,17 @@ export const verifyOtp = asyncHandler(async (req, res) => {
     user = await User.create({
       firstName: `Guest${ts}`,
       lastName: '',
-      phone,
-      authProvider: 'phone',
-      isPhoneVerified: true,
+      email: normalizedEmail,
+      authProvider: 'email',
+      isEmailVerified: true,
     });
     isNew = true;
   } else {
     if (!user.isActive) {
       throw new ApiError(403, 'Account is deactivated. Contact support.');
     }
-    // Mark phone as verified on every successful OTP (idempotent)
-    user.isPhoneVerified = true;
+    // Mark email as verified on every successful OTP (idempotent)
+    user.isEmailVerified = true;
     // Reset the resend throttle timestamp after a successful verify
     user.otpLastSentAt = null;
     await user.save({ validateBeforeSave: false });

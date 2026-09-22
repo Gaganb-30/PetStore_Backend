@@ -10,14 +10,14 @@ import { asyncHandler } from '../utils/helpers.js';
 import { ApiError } from '../middleware/errorHandler.js';
 import { sendOrderConfirmation, sendOrderStatusUpdate } from '../services/emailService.js';
 import { streamInvoice } from '../services/invoiceService.js';
-import config from '../config/index.js';
+import config, { isRazorpayConfigured } from '../config/index.js';
 
 // ---------------------------------------------------------------------------
 // Razorpay client — only instantiated when keys are configured, so the server
 // still boots (and COD still works) on a machine without payment credentials.
 // ---------------------------------------------------------------------------
 let razorpay;
-if (config.razorpay.keyId && config.razorpay.keySecret) {
+if (isRazorpayConfigured()) {
   razorpay = new Razorpay({
     key_id: config.razorpay.keyId,
     key_secret: config.razorpay.keySecret,
@@ -25,8 +25,8 @@ if (config.razorpay.keyId && config.razorpay.keySecret) {
 }
 
 const requireRazorpay = () => {
-  if (!razorpay) {
-    throw new ApiError(503, 'Online payments are not available right now. Please choose Cash on Delivery.');
+  if (!isRazorpayConfigured() || !razorpay) {
+    throw new ApiError(400, 'Online payments are currently unavailable because Razorpay credentials are not configured. Please choose Cash on Delivery.');
   }
   return razorpay;
 };
@@ -212,12 +212,19 @@ export const createOrder = asyncHandler(async (req, res) => {
   // Razorpay checkout order
   let razorpayOrder = null;
   if (paymentMethod === 'razorpay') {
-    razorpayOrder = await razorpay.orders.create({
-      amount: Math.round(totalPrice * 100), // paise
-      currency: 'INR',
-      receipt: order.orderNumber,
-      notes: { orderId: order._id.toString(), userId: req.user._id.toString() },
-    });
+    try {
+      razorpayOrder = await razorpay.orders.create({
+        amount: Math.round(totalPrice * 100), // paise
+        currency: 'INR',
+        receipt: order.orderNumber,
+        notes: { orderId: order._id.toString(), userId: req.user._id.toString() },
+      });
+    } catch (rzpErr) {
+      console.error('Razorpay order creation failed:', rzpErr);
+      await Order.findByIdAndDelete(order._id);
+      const desc = rzpErr.error?.description || rzpErr.message || 'Payment initiation failed';
+      throw new ApiError(400, `Online payment failed: ${desc}. Please choose Cash on Delivery.`);
+    }
 
     order.paymentResult = { razorpayOrderId: razorpayOrder.id, status: 'created' };
     await order.save();

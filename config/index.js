@@ -46,13 +46,9 @@ const config = {
     from: process.env.EMAIL_FROM || 'AniLiving <noreply@aniliving.com>',
   },
 
-  // MSG91 OTP
-  msg91: {
-    authKey:    process.env.MSG91_AUTH_KEY    || '',
-    templateId: process.env.MSG91_TEMPLATE_ID || '',
-    senderId:   process.env.MSG91_SENDER_ID   || 'ANILVG',
-  },
-
+  // Email OTP
+  // How many minutes an OTP stays valid before it expires
+  otpExpiryMinutes: parseInt(process.env.OTP_EXPIRY_MINUTES, 10) || 5,
   // How many minutes the user must wait before requesting a new OTP
   otpTimeoutMinutes: parseInt(process.env.OTP_TIMEOUT_MINUTES, 10) || 2,
 
@@ -68,6 +64,14 @@ const config = {
     pan: process.env.SELLER_PAN || process.env.PAN_NUMBER || '',
     gstin: process.env.SELLER_GSTIN || process.env.GST_NUMBER || '',
   },
+};
+
+export const isRazorpayConfigured = () => {
+  const keyId = config.razorpay.keyId?.trim();
+  const keySecret = config.razorpay.keySecret?.trim();
+  if (!keyId || !keySecret) return false;
+  if (keyId.includes('your_razorpay') || keySecret.includes('your_razorpay')) return false;
+  return keyId.startsWith('rzp_test_') || keyId.startsWith('rzp_live_');
 };
 
 export default config;

@@ -3,13 +3,13 @@ import bcrypt from 'bcryptjs';
 
 /**
  * User Model
- * Supports customers (phone-OTP) and admins (email+password) with address
+ * Supports customers (email-OTP) and admins (email+password) with address
  * management, wishlist, and refresh tokens.
  *
- * Auth flow change (phone-OTP):
- *   - email  → optional (sparse unique index so existing email users are kept)
- *   - phone  → required + unique for all non-admin accounts
- *   - authProvider 'phone' is the new default for storefront users
+ * Auth flow (email-OTP):
+ *   - email  → required + unique for all accounts
+ *   - phone  → optional (kept for delivery address contact)
+ *   - authProvider 'email' is the default for storefront users
  *   - password is only required when authProvider === 'local' (admin path)
  *   - otpLastSentAt tracks when the last OTP was sent so the server can
  *     enforce the resend timeout independently of the client.
@@ -42,8 +42,8 @@ const userSchema = new mongoose.Schema({
   },
 
   // ---------------------------------------------------------------------
-  // Contact — email is now optional (kept for admin accounts & legacy data)
-  // phone is the primary identifier for storefront (phone-OTP) users
+  // Contact — email is the primary identifier for storefront (email-OTP)
+  // users. phone is optional (used for delivery addresses).
   // ---------------------------------------------------------------------
   email: {
     type: String,
@@ -76,8 +76,8 @@ const userSchema = new mongoose.Schema({
   // ---------------------------------------------------------------------
   authProvider: {
     type: String,
-    enum: ['phone', 'local', 'google'],
-    default: 'phone',
+    enum: ['email', 'phone', 'local', 'google'],
+    default: 'email',
   },
   googleId: {
     type: String,
