@@ -13,7 +13,11 @@ import config from '../config/index.js';
  * controllers call after every write.
  */
 
-const DOMAIN = String(config.domain || '').replace(/\/+$/, '');
+export const getDomain = () => {
+  const d = String(process.env.DOMAIN || config.domain || 'https://aniliving.com').trim().replace(/\/+$/, '');
+  return d;
+};
+
 const CACHE_TTL_MS = 15 * 60 * 1000; // hard ceiling even if nothing invalidates
 
 let cache = { xml: null, generatedAt: 0 };
@@ -69,17 +73,19 @@ export const buildSitemap = async () => {
   xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"';
   xml += ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">';
 
+  const domain = getDomain();
+
   for (const page of STATIC_PAGES) {
-    xml += urlEntry(`${DOMAIN}${page.path}`, new Date(), page.changefreq, page.priority);
+    xml += urlEntry(`${domain}${page.path}`, new Date(), page.changefreq, page.priority);
   }
   for (const p of products) {
-    xml += urlEntry(`${DOMAIN}/product/${p.slug}`, p.updatedAt, 'weekly', '0.8', p.thumbnail);
+    xml += urlEntry(`${domain}/product/${p.slug}`, p.updatedAt, 'weekly', '0.8', p.thumbnail);
   }
   for (const c of categories) {
-    xml += urlEntry(`${DOMAIN}/shop?category=${c.slug}`, c.updatedAt, 'weekly', '0.7');
+    xml += urlEntry(`${domain}/shop?category=${c.slug}`, c.updatedAt, 'weekly', '0.7');
   }
   for (const b of brands) {
-    xml += urlEntry(`${DOMAIN}/shop?brand=${b.slug}`, b.updatedAt, 'weekly', '0.6');
+    xml += urlEntry(`${domain}/shop?brand=${b.slug}`, b.updatedAt, 'weekly', '0.6');
   }
 
   xml += '\n</urlset>';
@@ -108,7 +114,9 @@ export const invalidateSitemap = () => {
 };
 
 /** robots.txt, pointing crawlers at the dynamic sitemap */
-export const buildRobotsTxt = () => `User-agent: *
+export const buildRobotsTxt = () => {
+  const domain = getDomain();
+  return `User-agent: *
 Allow: /
 
 # Nothing below this line is useful to a search engine
@@ -123,8 +131,9 @@ Disallow: /register
 Disallow: /reset-password
 Disallow: /api/
 
-Sitemap: ${DOMAIN}/sitemap.xml
+Sitemap: ${domain}/sitemap.xml
 `;
+};
 
 export const getSitemapMeta = () => ({
   cached: Boolean(cache.xml),

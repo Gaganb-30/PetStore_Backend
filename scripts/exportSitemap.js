@@ -17,7 +17,11 @@ const exportSitemap = async () => {
     console.log('Connecting to MongoDB...');
     await mongoose.connect(config.mongoUri);
 
-    console.log('Generating sitemap XML from database...');
+    if (!process.env.DOMAIN || process.env.DOMAIN.includes('localhost')) {
+      process.env.DOMAIN = 'https://aniliving.com';
+    }
+
+    console.log(`Generating sitemap XML for ${process.env.DOMAIN}...`);
     const xml = await buildSitemap();
     const robots = buildRobotsTxt();
 
