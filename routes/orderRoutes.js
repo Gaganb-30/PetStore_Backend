@@ -32,7 +32,9 @@ router.patch('/:id/status', protect, authorize('admin'), updateOrderStatus);
 // Customer
 // ---------------------------------------------------------------------------
 router.post('/', protect, [
-  body('paymentMethod').isIn(['razorpay', 'cod']).withMessage('Choose a valid payment method'),
+  // Cash on delivery commented out for now - online payment via Razorpay only
+  // body('paymentMethod').isIn(['razorpay', 'cod']).withMessage('Choose a valid payment method'),
+  body('paymentMethod').isIn(['razorpay']).withMessage('Only online payment via Razorpay is accepted at this time'),
   body('shippingAddress.fullName').trim().notEmpty().withMessage('Full name is required'),
   body('shippingAddress.phone').trim().notEmpty().withMessage('Phone number is required'),
   body('shippingAddress.addressLine1').trim().notEmpty().withMessage('Address is required'),

@@ -178,13 +178,22 @@ export const createOrder = asyncHandler(async (req, res) => {
 
   const totalPrice = round2(taxableAmount + shippingPrice);
 
+  // Cash on delivery commented out for now - online payment via Razorpay only
+  /*
   if (paymentMethod === 'cod' && !settings.codEnabled) {
     throw new ApiError(400, 'Cash on Delivery is not available right now.');
   }
   if (!['cod', 'razorpay'].includes(paymentMethod)) {
     throw new ApiError(400, 'Unsupported payment method.');
   }
-  if (paymentMethod === 'razorpay') requireRazorpay();
+  */
+  if (paymentMethod === 'cod') {
+    throw new ApiError(400, 'Cash on Delivery is currently unavailable. Please complete your purchase using online payment.');
+  }
+  if (paymentMethod !== 'razorpay') {
+    throw new ApiError(400, 'Unsupported payment method. Please pay online via Razorpay.');
+  }
+  requireRazorpay();
 
   // -------------------------------------------------------------------
   // Persist the order

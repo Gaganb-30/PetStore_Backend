@@ -50,7 +50,7 @@ const STATIC_PAGES = [
   { path: '/faq', priority: '0.5', changefreq: 'monthly' },
   { path: '/track-order', priority: '0.4', changefreq: 'monthly' },
   { path: '/privacy-policy', priority: '0.3', changefreq: 'yearly' },
-  { path: '/refund-policy', priority: '0.3', changefreq: 'yearly' },
+  { path: '/exchange-and-replacement-policy', priority: '0.3', changefreq: 'yearly' },
   { path: '/shipping-policy', priority: '0.3', changefreq: 'yearly' },
   { path: '/cancellation-policy', priority: '0.3', changefreq: 'yearly' },
   { path: '/terms-and-conditions', priority: '0.3', changefreq: 'yearly' },
