@@ -1,6 +1,6 @@
 import Settings from '../models/Settings.js';
 import { asyncHandler } from '../utils/helpers.js';
-import config, { isRazorpayConfigured } from '../config/index.js';
+import config, { isRazorpayConfigured, isFastrrConfigured } from '../config/index.js';
 
 /**
  * @desc    Public site settings
@@ -14,6 +14,7 @@ import config, { isRazorpayConfigured } from '../config/index.js';
 export const getSettings = asyncHandler(async (req, res) => {
   const settings = await Settings.getSettings();
   const razorpayConfigured = isRazorpayConfigured();
+  const fastrrConfigured = isFastrrConfigured();
   res.json({
     success: true,
     data: {
@@ -22,6 +23,8 @@ export const getSettings = asyncHandler(async (req, res) => {
         razorpayKeyId: razorpayConfigured ? config.razorpay.keyId : null,
         razorpayEnabled: razorpayConfigured,
         googleClientId: config.google.clientId || null,
+        fastrrEnabled: fastrrConfigured,
+        fastrrEnv: config.fastrr.env,
       },
     },
   });

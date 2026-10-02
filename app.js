@@ -22,6 +22,7 @@ import bannerRoutes from './routes/bannerRoutes.js';
 import settingsRoutes from './routes/settingsRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
 import searchRoutes from './routes/searchRoutes.js';
+import fastrrRoutes from './routes/fastrrRoutes.js';
 import { getSitemap, getRobots } from './controllers/sitemapController.js';
 
 const app = express();
@@ -138,6 +139,7 @@ app.use('/api/banners', bannerRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/fastrr', fastrrRoutes);
 
 // ---------------------------------------------------------------------------
 // SEO endpoints — served at the domain root, generated live from the database

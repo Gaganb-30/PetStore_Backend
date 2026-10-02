@@ -61,13 +61,15 @@ const orderSchema = new mongoose.Schema({
   // Payment
   paymentMethod: {
     type: String,
-    enum: ['razorpay', 'cod'],
+    enum: ['razorpay', 'cod', 'fastrr'],
     required: true,
   },
+  fastrrOrderId: { type: String, index: true },
   paymentResult: {
     razorpayOrderId: { type: String },
     razorpayPaymentId: { type: String },
     razorpaySignature: { type: String },
+    fastrrOrderId: { type: String },
     status: { type: String },
     paidAt: { type: Date },
   },

@@ -37,6 +37,17 @@ const config = {
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   },
 
+  // Fastrr (Shiprocket Checkout)
+  fastrr: {
+    apiKey: process.env.FASTRR_API_KEY || '',
+    apiSecret: process.env.FASTRR_API_SECRET || '',
+    env: process.env.FASTRR_ENV || 'staging', // 'staging' or 'production'
+    baseUrl: process.env.FASTRR_BASE_URL || (process.env.FASTRR_ENV === 'production'
+      ? 'https://checkout-api.shiprocket.com'
+      : 'https://fastrr-api-dev.pickrr.com'),
+    enabled: process.env.FASTRR_ENABLED !== 'false',
+  },
+
   // Email
   email: {
     host: process.env.SMTP_HOST || 'smtp.gmail.com',
@@ -72,6 +83,12 @@ export const isRazorpayConfigured = () => {
   if (!keyId || !keySecret) return false;
   if (keyId.includes('your_razorpay') || keySecret.includes('your_razorpay')) return false;
   return keyId.startsWith('rzp_test_') || keyId.startsWith('rzp_live_');
+};
+
+export const isFastrrConfigured = () => {
+  const apiKey = config.fastrr.apiKey?.trim();
+  const apiSecret = config.fastrr.apiSecret?.trim();
+  return Boolean(apiKey && apiSecret && config.fastrr.enabled);
 };
 
 export default config;
