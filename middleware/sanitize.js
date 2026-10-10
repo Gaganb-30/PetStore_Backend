@@ -44,7 +44,7 @@ const clean = (value, depth = 0) => {
   }
 
   for (const key of Object.keys(value)) {
-    if (FORBIDDEN_KEY.test(key)) {
+    if (FORBIDDEN_KEY.test(key) || key === '__proto__' || key === 'constructor' || key === 'prototype') {
       delete value[key];
       continue;
     }

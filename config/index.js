@@ -91,4 +91,14 @@ export const isFastrrConfigured = () => {
   return Boolean(apiKey && apiSecret && config.fastrr.enabled);
 };
 
+// Security sanity check for production deployment
+if (config.env === 'production') {
+  if (config.jwtSecret.includes('dev_jwt_secret') || config.jwtSecret.length < 32) {
+    console.warn('⚠️  SECURITY WARNING: JWT_SECRET appears to be default or insecure in production mode!');
+  }
+  if (config.jwtRefreshSecret.includes('dev_jwt_refresh_secret') || config.jwtRefreshSecret.length < 32) {
+    console.warn('⚠️  SECURITY WARNING: JWT_REFRESH_SECRET appears to be default or insecure in production mode!');
+  }
+}
+
 export default config;

@@ -1,8 +1,10 @@
+import crypto from 'crypto';
 import Product from '../models/Product.js';
 import Category from '../models/Category.js';
 import Order from '../models/Order.js';
 import { asyncHandler } from '../utils/helpers.js';
 import { ApiError } from '../middleware/errorHandler.js';
+import config from '../config/index.js';
 import {
   createCheckoutAccessToken,
   getFastrrOrderDetails,
@@ -10,6 +12,7 @@ import {
   formatProductForFastrr,
   formatCategoryForFastrr,
   findCategoryByFastrrIntId,
+  calculateFastrrHmac,
 } from '../services/fastrrService.js';
 
 /**
@@ -111,9 +114,37 @@ export const getFastrrOrder = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Order not found or processing.');
   }
 
+  // Guard customer PII: if caller is not the authenticated owner or admin, mask sensitive details
+  const isOwnerOrAdmin = Boolean(
+    req.user && (
+      req.user.role === 'admin' ||
+      (order.user?._id ? order.user._id.toString() === req.user._id.toString() : order.user?.toString() === req.user._id.toString())
+    )
+  );
+
+  let responseOrder = order.toObject ? order.toObject() : JSON.parse(JSON.stringify(order));
+  if (!isOwnerOrAdmin) {
+    if (responseOrder.user) {
+      responseOrder.user = {
+        firstName: responseOrder.user.firstName || '',
+        lastName: responseOrder.user.lastName ? `${responseOrder.user.lastName[0]}.` : '',
+      };
+    }
+    if (responseOrder.shippingAddress?.phone) {
+      const p = String(responseOrder.shippingAddress.phone);
+      responseOrder.shippingAddress.phone = p.length >= 4 ? `${'*'.repeat(p.length - 4)}${p.slice(-4)}` : '****';
+    }
+    if (responseOrder.shippingAddress?.addressLine1) {
+      responseOrder.shippingAddress.addressLine1 = '••••••••';
+    }
+    if (responseOrder.shippingAddress?.addressLine2) {
+      delete responseOrder.shippingAddress.addressLine2;
+    }
+  }
+
   res.json({
     success: true,
-    data: { order },
+    data: { order: responseOrder },
   });
 });
 
@@ -129,6 +160,28 @@ export const getFastrrOrder = asyncHandler(async (req, res) => {
  * @access  Public (Called by Fastrr servers)
  */
 export const handleOrderWebhook = asyncHandler(async (req, res) => {
+  const apiSecret = config.fastrr.apiSecret?.trim();
+  const apiKey = config.fastrr.apiKey?.trim();
+
+  // Webhook signature / API key verification when credentials are configured
+  if (apiSecret) {
+    const signature = req.headers['x-api-hmac-sha256'] || req.headers['x-fastrr-signature'];
+    if (!signature || typeof signature !== 'string') {
+      return res.status(401).json({ ok: false, error: 'Missing webhook signature' });
+    }
+    const expectedHmac = calculateFastrrHmac(apiSecret, req.body);
+    const sigBuf = Buffer.from(signature, 'utf8');
+    const expBuf = Buffer.from(expectedHmac, 'utf8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return res.status(401).json({ ok: false, error: 'Invalid webhook signature' });
+    }
+  } else if (apiKey) {
+    const incomingKey = req.headers['x-api-key'];
+    if (!incomingKey || incomingKey !== apiKey) {
+      return res.status(401).json({ ok: false, error: 'Invalid API key' });
+    }
+  }
+
   const orderData = req.body;
   if (!orderData || (!orderData.order_id && !orderData.platform_order_id)) {
     return res.status(400).json({ ok: false, error: 'Missing order_id' });

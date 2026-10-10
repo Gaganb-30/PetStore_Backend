@@ -137,10 +137,11 @@ export const addToCart = asyncHandler(async (req, res) => {
  * @access  Private
  */
 export const updateCartItem = asyncHandler(async (req, res) => {
-  const { quantity } = req.body;
-  if (!quantity || quantity < 1) {
-    throw new ApiError(400, 'Quantity must be at least 1.');
+  const parsedQty = parseInt(req.body.quantity, 10);
+  if (!Number.isInteger(parsedQty) || parsedQty < 1) {
+    throw new ApiError(400, 'Quantity must be a positive integer.');
   }
+  const quantity = parsedQty;
 
   const cart = await Cart.findOne({ user: req.user._id });
   if (!cart) throw new ApiError(404, 'Cart not found.');

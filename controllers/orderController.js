@@ -6,7 +6,7 @@ import Cart from '../models/Cart.js';
 import Coupon from '../models/Coupon.js';
 import Settings from '../models/Settings.js';
 import PaymentLog from '../models/PaymentLog.js';
-import { asyncHandler } from '../utils/helpers.js';
+import { asyncHandler, escapeRegex } from '../utils/helpers.js';
 import { ApiError } from '../middleware/errorHandler.js';
 import { sendOrderConfirmation, sendOrderStatusUpdate } from '../services/emailService.js';
 import { streamInvoice } from '../services/invoiceService.js';
@@ -159,8 +159,9 @@ export const createOrder = asyncHandler(async (req, res) => {
   let discountAmount = 0;
   let couponData = null;
   let couponDoc = null;
-  if (couponCode) {
-    couponDoc = await Coupon.findOne({ code: couponCode.toUpperCase() });
+  if (couponCode && typeof couponCode === 'string' && couponCode.trim()) {
+    const cleanCoupon = couponCode.trim().toUpperCase();
+    couponDoc = await Coupon.findOne({ code: cleanCoupon });
     if (!couponDoc) throw new ApiError(400, 'Invalid coupon code.');
     const validation = couponDoc.isValid(itemsPrice, req.user._id);
     if (!validation.valid) throw new ApiError(400, validation.message);
@@ -295,20 +296,38 @@ export const createOrder = asyncHandler(async (req, res) => {
 export const verifyPayment = asyncHandler(async (req, res) => {
   const { razorpayPaymentId, razorpayOrderId, razorpaySignature } = req.body;
 
+  if (
+    !razorpayPaymentId || !razorpayOrderId || !razorpaySignature ||
+    typeof razorpayPaymentId !== 'string' ||
+    typeof razorpayOrderId !== 'string' ||
+    typeof razorpaySignature !== 'string'
+  ) {
+    throw new ApiError(400, 'Invalid payment verification payload.');
+  }
+
   const order = await Order.findById(req.params.id);
   if (!order) throw new ApiError(404, 'Order not found.');
   if (order.user.toString() !== req.user._id.toString()) {
     throw new ApiError(403, 'Not authorized.');
   }
 
+  // Ensure this payment corresponds strictly to the Razorpay order ID recorded for this order
+  if (!order.paymentResult?.razorpayOrderId || order.paymentResult.razorpayOrderId !== razorpayOrderId) {
+    throw new ApiError(400, 'Payment details do not match this order.');
+  }
+
   // The signature is HMAC(order_id|payment_id, key_secret). Recomputing it
-  // server-side is what stops a client from claiming an unpaid order is paid.
+  // server-side with timing-safe comparison is what stops a client from claiming an unpaid order is paid.
   const expectedSignature = crypto
     .createHmac('sha256', config.razorpay.keySecret)
     .update(`${razorpayOrderId}|${razorpayPaymentId}`)
     .digest('hex');
 
-  if (expectedSignature !== razorpaySignature) {
+  const sigBuf = Buffer.from(razorpaySignature, 'utf8');
+  const expBuf = Buffer.from(expectedSignature, 'utf8');
+  const isMatch = sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
+
+  if (!isMatch) {
     order.paymentResult.status = 'failed';
     order.statusHistory.push({ status: 'pending', note: 'Payment signature verification failed' });
     await order.save();
@@ -327,6 +346,26 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     });
 
     throw new ApiError(400, 'Payment verification failed. If money was deducted it will be refunded automatically.');
+  }
+
+  // Verify payment status and amount with Razorpay API if client is available
+  if (razorpay) {
+    try {
+      const paymentInfo = await razorpay.payments.fetch(razorpayPaymentId);
+      if (paymentInfo.order_id !== razorpayOrderId) {
+        throw new ApiError(400, 'Payment order mismatch.');
+      }
+      if (!['authorized', 'captured'].includes(paymentInfo.status)) {
+        throw new ApiError(400, 'Payment is not in an authorized or captured state.');
+      }
+      const expectedPaise = Math.round(order.totalPrice * 100);
+      if (Number(paymentInfo.amount) < expectedPaise) {
+        throw new ApiError(400, 'Paid amount is less than order total.');
+      }
+    } catch (err) {
+      if (err instanceof ApiError) throw err;
+      console.warn('Razorpay API verification check skipped/failed:', err?.message);
+    }
   }
 
   // Idempotent — a webhook may have marked this paid already.
@@ -471,7 +510,10 @@ export const getOrderById = asyncHandler(async (req, res) => {
  * @access  Public
  */
 export const trackOrder = asyncHandler(async (req, res) => {
-  const order = await Order.findOne({ orderNumber: req.params.orderNumber.toUpperCase() })
+  const rawOrderNumber = String(req.params.orderNumber || '').trim().toUpperCase();
+  if (!rawOrderNumber) throw new ApiError(400, 'Please provide an order number.');
+
+  const order = await Order.findOne({ orderNumber: rawOrderNumber })
     .select('orderNumber status statusHistory trackingNumber trackingUrl estimatedDelivery isPaid isDelivered isCancelled createdAt items.name items.quantity items.thumbnail shippingAddress.city shippingAddress.state')
     .lean();
 
@@ -510,27 +552,51 @@ export const cancelOrder = asyncHandler(async (req, res) => {
     throw new ApiError(403, 'Not authorized.');
   }
 
+  if (order.isCancelled || order.status === 'cancelled') {
+    throw new ApiError(400, 'This order is already cancelled.');
+  }
+
   // Once a parcel has left the warehouse, cancellation has to go through support.
   const cancellable = ['pending', 'confirmed', 'processing'];
   if (!cancellable.includes(order.status)) {
     throw new ApiError(400, `An order that is already ${order.status.replace(/_/g, ' ')} cannot be cancelled online. Please contact support.`);
   }
 
-  order.status = 'cancelled';
-  order.isCancelled = true;
-  order.cancelledAt = new Date();
-  order.cancellationReason = req.body.reason || 'Cancelled by customer';
-  order.statusHistory.push({ status: 'cancelled', note: order.cancellationReason, updatedBy: req.user._id });
-  await order.save();
+  const reason = (typeof req.body.reason === 'string' ? req.body.reason.trim() : '') || 'Cancelled by customer';
+
+  // Atomic state change to prevent double-restoring stock on concurrent requests
+  const updatedOrder = await Order.findOneAndUpdate(
+    { _id: order._id, isCancelled: { $ne: true }, status: { $in: cancellable } },
+    {
+      $set: {
+        status: 'cancelled',
+        isCancelled: true,
+        cancelledAt: new Date(),
+        cancellationReason: reason,
+      },
+      $push: {
+        statusHistory: {
+          status: 'cancelled',
+          note: reason,
+          updatedBy: req.user._id,
+        },
+      },
+    },
+    { new: true }
+  );
+
+  if (!updatedOrder) {
+    throw new ApiError(400, 'Order could not be cancelled or was already cancelled.');
+  }
 
   // Return the reserved stock
-  for (const item of order.items) {
+  for (const item of updatedOrder.items) {
     await adjustStock(item.product, item.variantId, item.quantity);
   }
 
-  sendOrderStatusUpdate(req.user, order);
+  sendOrderStatusUpdate(req.user, updatedOrder);
 
-  res.json({ success: true, message: 'Order cancelled.', data: { order } });
+  res.json({ success: true, message: 'Order cancelled.', data: { order: updatedOrder } });
 });
 
 // ===========================================================================
@@ -552,7 +618,7 @@ export const getAllOrders = asyncHandler(async (req, res) => {
   if (req.query.paymentMethod) filter.paymentMethod = req.query.paymentMethod;
   if (req.query.isPaid !== undefined && req.query.isPaid !== '') filter.isPaid = req.query.isPaid === 'true';
   if (req.query.search) {
-    const rx = new RegExp(req.query.search.trim(), 'i');
+    const rx = new RegExp(escapeRegex(req.query.search.trim()), 'i');
     filter.$or = [
       { orderNumber: rx },
       { 'shippingAddress.fullName': rx },
@@ -680,12 +746,18 @@ export const razorpayWebhook = asyncHandler(async (req, res) => {
     throw new ApiError(503, 'Webhook secret not configured.');
   }
 
+  if (!signature || typeof signature !== 'string') {
+    throw new ApiError(400, 'Invalid webhook signature.');
+  }
+
   const expectedSignature = crypto
     .createHmac('sha256', config.razorpay.webhookSecret)
     .update(rawBody)
     .digest('hex');
 
-  if (signature !== expectedSignature) {
+  const sigBuf = Buffer.from(signature, 'utf8');
+  const expBuf = Buffer.from(expectedSignature, 'utf8');
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
     throw new ApiError(400, 'Invalid webhook signature.');
   }
 
@@ -712,6 +784,16 @@ export const razorpayWebhook = asyncHandler(async (req, res) => {
   };
 
   if (event === 'payment.captured' && order) {
+    const paidPaise = entity.amount ? Math.round(Number(entity.amount)) : 0;
+    const expectedPaise = Math.round(order.totalPrice * 100);
+    if (paidPaise > 0 && paidPaise < expectedPaise) {
+      console.error(`Underpaid order ${order.orderNumber}: expected ${expectedPaise} paise, received ${paidPaise} paise`);
+      order.statusHistory.push({ status: order.status, note: `Partial payment received (${paidPaise / 100} of ${order.totalPrice})` });
+      await order.save();
+      PaymentLog.record({ ...logBase, status: 'failed', errorDescription: 'Underpaid amount' });
+      return res.json({ success: true });
+    }
+
     if (!order.isPaid) {
       order.isPaid = true;
       order.paidAt = new Date();

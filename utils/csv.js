@@ -51,9 +51,13 @@ export const parseCsv = (text) => {
     .map((r) => Object.fromEntries(headers.map((h, i) => [h, (r[i] ?? '').trim()])));
 };
 
-/** Quote a single CSV cell when it contains a delimiter, quote or newline */
+/** Quote a single CSV cell, escaping quotes and neutralizing formula injection (=, +, -, @) */
 const quote = (value) => {
-  const str = value === null || value === undefined ? '' : String(value);
+  let str = value === null || value === undefined ? '' : String(value);
+  // Neutralize CSV/formula injection for spreadsheet applications (Excel, Calc)
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
   return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
 };
 

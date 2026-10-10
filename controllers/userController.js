@@ -1,5 +1,5 @@
 import User from '../models/User.js';
-import { asyncHandler, buildColorOptions } from '../utils/helpers.js';
+import { asyncHandler, buildColorOptions, escapeRegex } from '../utils/helpers.js';
 import { ApiError } from '../middleware/errorHandler.js';
 
 /**
@@ -189,10 +189,11 @@ export const getAllUsers = asyncHandler(async (req, res) => {
   const filter = {};
   if (req.query.role) filter.role = req.query.role;
   if (req.query.search) {
+    const escaped = escapeRegex(String(req.query.search).trim());
     filter.$or = [
-      { firstName: { $regex: req.query.search, $options: 'i' } },
-      { lastName: { $regex: req.query.search, $options: 'i' } },
-      { email: { $regex: req.query.search, $options: 'i' } },
+      { firstName: { $regex: escaped, $options: 'i' } },
+      { lastName: { $regex: escaped, $options: 'i' } },
+      { email: { $regex: escaped, $options: 'i' } },
     ];
   }
 

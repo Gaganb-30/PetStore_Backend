@@ -31,12 +31,18 @@ export const deleteCoupon = asyncHandler(async (req, res) => {
 // @desc Validate coupon (public check) | POST /api/coupons/validate | Private
 export const validateCoupon = asyncHandler(async (req, res) => {
   const { code, orderTotal } = req.body;
-  const coupon = await Coupon.findOne({ code: code.toUpperCase() });
+  if (!code || typeof code !== 'string') {
+    throw new ApiError(400, 'Please provide a valid coupon code.');
+  }
+
+  const cleanCode = code.trim().toUpperCase();
+  const coupon = await Coupon.findOne({ code: cleanCode });
   if (!coupon) throw new ApiError(404, 'Invalid coupon code.');
 
-  const validation = coupon.isValid(orderTotal, req.user._id);
+  const total = Number(orderTotal) || 0;
+  const validation = coupon.isValid(total, req.user._id);
   if (!validation.valid) throw new ApiError(400, validation.message);
 
-  const discount = coupon.calculateDiscount(orderTotal);
+  const discount = coupon.calculateDiscount(total);
   res.json({ success: true, data: { valid: true, discount, type: coupon.type, value: coupon.value } });
 });
