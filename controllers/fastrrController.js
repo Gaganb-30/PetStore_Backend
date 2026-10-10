@@ -9,6 +9,7 @@ import {
   syncFastrrOrder,
   formatProductForFastrr,
   formatCategoryForFastrr,
+  findCategoryByFastrrIntId,
 } from '../services/fastrrService.js';
 
 /**
@@ -219,15 +220,24 @@ export const getFastrrProductsByCollection = asyncHandler(async (req, res) => {
 
   let category = null;
   if (collectionId) {
-    category = await Category.findById(collectionId).catch(() => null);
+    category = await findCategoryByFastrrIntId(collectionId);
+    // If a collectionId was provided but not found, return empty results
     if (!category) {
-      category = await Category.findOne({ slug: collectionId });
+      return res.json({
+        data: {
+          total: 0,
+          products: [],
+        },
+      });
     }
   }
 
   const filter = { isActive: true };
   if (category) {
-    filter.$or = [{ category: category._id }, { subcategory: category._id }];
+    // Include products mapped directly to this category or its subcategories
+    const subcats = await Category.find({ parent: category._id }).select('_id');
+    const catIds = [category._id, ...subcats.map((s) => s._id)];
+    filter.$or = [{ category: { $in: catIds } }, { subcategory: { $in: catIds } }];
   }
 
   const total = await Product.countDocuments(filter);

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import config from '../config/index.js';
 import Order from '../models/Order.js';
 import Product from '../models/Product.js';
+import Category from '../models/Category.js';
 import User from '../models/User.js';
 import Settings from '../models/Settings.js';
 import { sendOrderConfirmation } from './emailService.js';
@@ -32,6 +33,106 @@ export const getFastrrBaseUrl = () => {
 };
 
 /**
+ * Convert a MongoDB ObjectId to a deterministic positive integer for Fastrr.
+ *
+ * Fastrr requires all `id` fields in catalog / checkout payloads to be integers.
+ * We take the last 8 hex characters of the 24-char ObjectId and parse them as
+ * a base-16 number, yielding a value between 0 and 4,294,967,295 (2^32 − 1).
+ *
+ * For a typical store-sized catalog (hundreds to low-thousands of items) the
+ * chance of collision is negligibly small.
+ */
+export const mongoIdToInt = (id) => {
+  const hex = String(id);
+  return parseInt(hex.slice(-8), 16);
+};
+
+/**
+ * Reverse-lookup: find a Product (and optionally its variant) whose ObjectId
+ * maps to the given Fastrr integer ID.
+ *
+ * Because Fastrr sends integer IDs back in order webhooks and cart_data, we
+ * need a way to resolve them back to our MongoDB documents.
+ *
+ * @param {number|string} intId  The integer ID Fastrr sent back
+ * @returns {{ product, variant }|null}
+ */
+export const findProductByFastrrIntId = async (intId) => {
+  const target = Number(intId);
+  if (!Number.isFinite(target)) return null;
+
+  // First try: maybe it's already a valid ObjectId string (backward compat)
+  const asString = String(intId);
+  if (/^[a-f0-9]{24}$/i.test(asString)) {
+    const direct = await Product.findById(asString);
+    if (direct) return { product: direct, variant: null };
+    const byVariant = await Product.findOne({ 'variants._id': asString });
+    if (byVariant) return { product: byVariant, variant: byVariant.variants.id(asString) };
+  }
+
+  // Load all active products and compute the int for each
+  const products = await Product.find({ isActive: true });
+  for (const p of products) {
+    // Check product-level ID
+    if (mongoIdToInt(p._id) === target) {
+      return { product: p, variant: null };
+    }
+    // Check each variant ID
+    if (p.variants?.length) {
+      for (const v of p.variants) {
+        if (mongoIdToInt(v._id) === target) {
+          return { product: p, variant: v };
+        }
+      }
+    }
+  }
+
+  // Fallback: try SKU match
+  const bySku = await Product.findOne({ sku: asString });
+  if (bySku) return { product: bySku, variant: null };
+
+  return null;
+};
+
+/**
+ * Reverse-lookup: find a Category whose ObjectId maps to the given Fastrr integer ID.
+ *
+ * Fastrr requests /api/fastrr/collections/:collection_id/products using the integer ID
+ * we returned in formatCategoryForFastrr.
+ *
+ * @param {number|string} intId  The collection ID (integer, ObjectId string, or slug)
+ * @returns {Promise<Category|null>}
+ */
+export const findCategoryByFastrrIntId = async (intId) => {
+  if (!intId) return null;
+
+  const asString = String(intId).trim();
+  const target = Number(asString);
+
+  // 1. If it's a 24-char hex ObjectId, try direct findById
+  if (/^[a-f0-9]{24}$/i.test(asString)) {
+    const direct = await Category.findById(asString).catch(() => null);
+    if (direct) return direct;
+  }
+
+  // 2. If it's a valid integer, find by comparing mongoIdToInt(cat._id)
+  if (Number.isFinite(target)) {
+    const categories = await Category.find({});
+    for (const cat of categories) {
+      if (mongoIdToInt(cat._id) === target) {
+        return cat;
+      }
+    }
+  }
+
+  // 3. Fallback: try slug match
+  const bySlug = await Category.findOne({ slug: asString }).catch(() => null);
+  if (bySlug) return bySlug;
+
+  return null;
+};
+
+/**
  * Create a Fastrr Checkout Access Token
  *
  * Called when a customer clicks "Checkout" in the Cart or "Buy Now" on a Product.
@@ -49,9 +150,9 @@ export const createCheckoutAccessToken = async ({ items = [], redirectUrl }) => 
     throw new Error('Fastrr API Key or Secret is not configured in server environment.');
   }
 
-  // Map cart items into Fastrr format: { variant_id: string, quantity: number }
+  // Map cart items into Fastrr format: { variant_id: integer, quantity: number }
   const fastrrItems = items.map((it) => ({
-    variant_id: String(it.variantId || it.productId),
+    variant_id: mongoIdToInt(it.variantId || it.productId),
     quantity: Math.max(1, parseInt(it.quantity, 10) || 1),
   }));
 
@@ -290,20 +391,29 @@ export const syncFastrrOrder = async (fastrrData) => {
   let calculatedSubtotal = 0;
 
   for (const rawItem of rawItems) {
-    const identifier = String(rawItem.variant_id || rawItem.id);
+    const identifier = rawItem.variant_id ?? rawItem.id;
     const quantity = Math.max(1, parseInt(rawItem.quantity, 10) || 1);
 
-    // Try finding by variant ID first
-    let product = await Product.findOne({ 'variants._id': identifier });
+    // Resolve product/variant — Fastrr sends back the integer IDs we gave it
+    let product = null;
     let resolvedVariant = null;
 
-    if (product) {
-      resolvedVariant = product.variants.id(identifier);
+    const match = await findProductByFastrrIntId(identifier);
+    if (match) {
+      product = match.product;
+      resolvedVariant = match.variant;
     } else {
-      // Find by product ID or SKU
-      product = await Product.findById(identifier).catch(() => null);
+      // Last-resort fallback: try raw identifier as ObjectId or SKU
+      const idStr = String(identifier);
+      product = await Product.findById(idStr).catch(() => null);
       if (!product) {
-        product = await Product.findOne({ sku: identifier });
+        const byVariant = await Product.findOne({ 'variants._id': idStr });
+        if (byVariant) {
+          product = byVariant;
+          resolvedVariant = byVariant.variants.id(idStr);
+        } else {
+          product = await Product.findOne({ sku: idStr });
+        }
       }
     }
 
@@ -411,7 +521,7 @@ export const formatProductForFastrr = (product) => {
         : (v.attributeCombination ? Object.entries(v.attributeCombination).map(([k, val]) => `${k}: ${val}`).join(', ') : 'Default');
 
       return {
-        id: String(v._id),
+        id: mongoIdToInt(v._id),
         title: vTitle || 'Default',
         price: String(v.price),
         sku: v.sku || product.sku || String(v._id),
@@ -427,7 +537,7 @@ export const formatProductForFastrr = (product) => {
   } else {
     variants = [
       {
-        id: String(product._id),
+        id: mongoIdToInt(product._id),
         title: 'Default',
         price: String(product.price),
         sku: product.sku || String(product._id),
@@ -443,7 +553,7 @@ export const formatProductForFastrr = (product) => {
   }
 
   return {
-    id: String(product._id),
+    id: mongoIdToInt(product._id),
     title: product.name,
     body_html: product.richDescription || product.longDescription || product.shortDescription || '',
     vendor: product.brand?.name || 'AniLiving',
@@ -464,7 +574,7 @@ export const formatProductForFastrr = (product) => {
  * Formats Category into Fastrr Collection format
  */
 export const formatCategoryForFastrr = (category) => ({
-  id: String(category._id),
+  id: mongoIdToInt(category._id),
   title: category.name,
   handle: category.slug,
   body_html: category.description || '',
