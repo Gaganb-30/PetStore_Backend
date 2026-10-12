@@ -97,7 +97,7 @@ export const findProductByFastrrIntId = async (intId) => {
 /**
  * Reverse-lookup: find a Category whose ObjectId maps to the given Fastrr integer ID.
  *
- * Fastrr requests /api/fastrr/collections/:collection_id/products using the integer ID
+ * Fastrr requests /api/fastrr/collections/products?collection_id=:id using the integer ID
  * we returned in formatCategoryForFastrr.
  *
  * @param {number|string} intId  The collection ID (integer, ObjectId string, or slug)

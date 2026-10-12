@@ -263,35 +263,43 @@ export const getFastrrProducts = asyncHandler(async (req, res) => {
 
 /**
  * @desc    Fetch Products by Collection for Fastrr Catalog
+ * @route   GET /api/fastrr/collections/products?collection_id=1234&page=1&limit=100
  * @route   GET /api/fastrr/collections/:collection_id/products
  * @route   GET /api/fastrr/collection-products
  * @access  Public
  */
 export const getFastrrProductsByCollection = asyncHandler(async (req, res) => {
-  const collectionId = req.params.collection_id || req.query.collection_id;
+  const collectionId = req.query.collection_id || req.query.collectionId || req.params.collection_id;
   const { limit, skip } = getPagination(req);
 
-  let category = null;
-  if (collectionId) {
-    category = await findCategoryByFastrrIntId(collectionId);
-    // If a collectionId was provided but not found, return empty results
-    if (!category) {
-      return res.json({
-        data: {
-          total: 0,
-          products: [],
-        },
-      });
-    }
+  // If no collection ID is provided, return empty products list
+  if (!collectionId) {
+    return res.json({
+      data: {
+        total: 0,
+        products: [],
+      },
+    });
   }
 
-  const filter = { isActive: true };
-  if (category) {
-    // Include products mapped directly to this category or its subcategories
-    const subcats = await Category.find({ parent: category._id }).select('_id');
-    const catIds = [category._id, ...subcats.map((s) => s._id)];
-    filter.$or = [{ category: { $in: catIds } }, { subcategory: { $in: catIds } }];
+  const category = await findCategoryByFastrrIntId(collectionId);
+  // If a collectionId was provided but not found, return empty results
+  if (!category) {
+    return res.json({
+      data: {
+        total: 0,
+        products: [],
+      },
+    });
   }
+
+  // Include products mapped directly to this category or its subcategories
+  const subcats = await Category.find({ parent: category._id }).select('_id');
+  const catIds = [category._id, ...subcats.map((s) => s._id)];
+  const filter = {
+    isActive: true,
+    $or: [{ category: { $in: catIds } }, { subcategory: { $in: catIds } }],
+  };
 
   const total = await Product.countDocuments(filter);
   const products = await Product.find(filter)
