@@ -512,6 +512,11 @@ export const formatProductForFastrr = (product) => {
     images.push({ src: product.thumbnail });
   }
 
+  // Weight helper
+  const rawWeight = product.specifications?.get?.('Weight')
+    || (product.specifications && !(product.specifications instanceof Map) ? product.specifications.Weight : null);
+  const grams = rawWeight ? parseInt(rawWeight, 10) || 500 : 500;
+
   // Build variants
   let variants = [];
   if (product.variants && product.variants.length > 0) {
@@ -520,31 +525,56 @@ export const formatProductForFastrr = (product) => {
         ? Array.from(v.attributeCombination.entries()).map(([k, val]) => `${k}: ${val}`).join(', ')
         : (v.attributeCombination ? Object.entries(v.attributeCombination).map(([k, val]) => `${k}: ${val}`).join(', ') : 'Default');
 
+      let optionValues = {};
+      if (v.attributeCombination instanceof Map) {
+        optionValues = Object.fromEntries(v.attributeCombination.entries());
+      } else if (v.attributeCombination && typeof v.attributeCombination === 'object') {
+        optionValues = typeof v.attributeCombination.toObject === 'function'
+          ? v.attributeCombination.toObject()
+          : { ...v.attributeCombination };
+      }
+
+      const variantQty = typeof v.stock === 'number'
+        ? v.stock
+        : (typeof product.stock === 'number' ? product.stock : 0);
+      const comparePrice = (v.mrp != null && v.mrp !== '')
+        ? String(v.mrp)
+        : (product.mrp != null && product.mrp !== '' ? String(product.mrp) : String(v.price));
+
       return {
         id: mongoIdToInt(v._id),
         title: vTitle || 'Default',
         price: String(v.price),
+        compare_at_price: comparePrice,
         sku: v.sku || product.sku || String(v._id),
+        quantity: Math.max(0, parseInt(variantQty, 10) || 0),
         created_at: v.createdAt || product.createdAt,
         updated_at: v.updatedAt || product.updatedAt,
         taxable: true,
-        grams: product.specifications?.get?.('Weight') ? parseInt(product.specifications.get('Weight'), 10) : 500,
+        option_values: optionValues,
+        grams,
         image: { src: v.images?.[0] || product.thumbnail || images[0]?.src || '' },
         weight: 0.5,
         weight_unit: 'kg',
       };
     });
   } else {
+    const productQty = typeof product.stock === 'number' ? product.stock : 0;
+    const comparePrice = (product.mrp != null && product.mrp !== '') ? String(product.mrp) : String(product.price);
+
     variants = [
       {
         id: mongoIdToInt(product._id),
         title: 'Default',
         price: String(product.price),
+        compare_at_price: comparePrice,
         sku: product.sku || String(product._id),
+        quantity: Math.max(0, parseInt(productQty, 10) || 0),
         created_at: product.createdAt,
         updated_at: product.updatedAt,
         taxable: true,
-        grams: 500,
+        option_values: {},
+        grams,
         image: { src: product.thumbnail || images[0]?.src || '' },
         weight: 0.5,
         weight_unit: 'kg',
